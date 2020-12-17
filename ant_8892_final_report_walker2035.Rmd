@@ -1,0 +1,680 @@
+---
+title: "Ant 8892 Final Project - Rethinking the Milpa Game"
+author: "Matthew Walker"
+date: "12/10/2020"
+output:
+  html_document:
+    latex_engine: xelatex
+    toc: true
+    code_folding: hide
+    df_print: kable
+
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(rethinking)
+library(dagitty)
+library(reshape2)
+library(dplyr)
+library(ggplot2)
+library(ellipse)
+
+load(file = "milpatemp3.RData")
+```
+
+### Background
+
+The potential merits – and risks – of the practice of swidden agriculture, where farmers cultivate subsistence crops such as maize in patches of forests cleared by a process commonly known as “slash and burn,” have been widely debated across disciplines. Often, these discussions are focused on ascertaining whether swidden is inherently destructive of tropical forest environments (Malthus 1826; Boserup 1965), or whether it can exhibit sustainability.
+
+Two predominant, opposing theories emerged as potential explanations for the complex functions of swidden agriculture: the first argues that swidden is strictly limited by ecological carrying capacity, or the maximum sustainable population size given the availability of resources, and therefore subjects natural environments to overexploitation and deforestation (Food and Agriculture Organization 1985); the second approach, contrary to ‘Western scientific’ management practices, conceives of ‘coupled human and natural systems’ in which human cultures develop detailed knowledge of their local environments and the processes which best conserve and protect this ecosystem – a collective understanding also known as Traditional Ecological Knowledge, or TEK. However, despite the significant corpora of research, which span questions about the integration of swidden in ecology, culture, society, and religion (Conklin 1954; Geertz 1963), how swidden can be practiced sustainably and augment forest resilience (Balée 2013), or even the role of swidden systems in a globalized, technological world (Weinstock 2015), the relationships between specific social and spatial dynamics and ecological features such as carrying capacities and stock effects remain unclear.
+
+Despite the negative connotation of the phrase “slash and burn,” swidden agriculture is how many indigenous communities like the Q'eqchi Maya of southern Belize have been sustainably producing food for thousands of years.
+
+There are a number of complex cultural and historical contexts which are needed to analyze the swidden practices of Q’eqchi’ Maya communities. Importantly, Q’eqchi’ social institutions do not actively protect common forest resources (Downey 2009). The resources are instead collectively managed through reciprocal exchanges of labor. This is a consequence of the colonial period when access to government land for swidden production – both subsistence and market-oriented – was largely unregulated, making land a common property resource available to Q’eqchi’ farmers (Downey 2015). In most villages, labor exchanges – which occur when one farmer asks a group of men to help with a difficult task such as planting or clearing the forest – have become the key social process involved with swidden agriculture (Wilk 1997). After each workgroup, a farmer is expected to close his debt to each man who helped him by reciprocating a day of labor.
+
+The guiding research question here is: how do indigenous social norms like those surrounding this practice of common resource management help regulate the use of a natural resource such as the forest, making sure it remains sustainable (at a ‘group optimum’) rather than using it at its maximum rate (‘Nash equilibrium’; Nash 1950)? 
+
+Our hypothesis is that social norms related to labor reciprocity encourage sustainable use of shared forest resources. 
+
+### Data Story
+
+We can trace various strategies of labor reciprocity such as graduated sanctioning by a simulated common resource management game. 
+
+![Downey 2020](milpaboardpng.PNG)
+
+The game consists of a 10x10 board of “chips” representing forest resources. There are 3 Stages, each with 10 rounds. 5 players make requests each round that determine how much of the forest is cleared. After each Round, the forest regenerates an amount of chips proportional to how many 10s of chips are left:
+
+$$F_{round}= F_{round-1} - C_{round} + \lfloor(\frac{F_{round-1} - C_{round}}{10})\rfloor$$
+
+where F is the forest size (number of chips) and C is the clearing size, defined as:
+
+$$C_{round} = \sum_i\ min(\ max(\ 0\ ,\ req_i\ )\ ,\sum_jhelp_{ij}\ )\  \forall\ players\ i,j\in [A,B,C,D,E] $$
+
+Stages II and III are designed to explore the effect of helping and labor exchange. In Stage II, players require the assistance of the other group members to take more than 1 unit (players may always help themselves). The Nash equilibrium remains the same as in Stage I, as does the optimal group strategy, but there are numerous paths to success depending on how much help is given or withheld. 
+
+The difference between these strategies can be seen in the parameter space of the Milpa Game, can be visualized as:
+
+![Downey 2020](parameterspacepng.PNG)
+
+In Stage III, there is a brief communication period in between rounds which players may use to discuss strategy. For the sake of this analysis, only Stage II will be used.
+
+These data are well-suited for adapting a Bayesian approach due to the relatively small sample size and the complexity of the questions being asked. Regularizing priors and other features of Bayesian modeling will be essential to extracting various strategies being employed across rounds, such as graduated sanctioning. The data can also resemble a dyadic structure with player-requestor pairs for which the Bayesian social relations model would work well.
+
+Some of the key questions these models can help answer are:
+
+ - Can we isolate and trace different play strategies?
+ - Do strategies change over time (rounds)?
+ - Does reciprocity depend on previous help (lag)?
+ - Does forest level determine request size?
+
+The data are split across numerous tables (help, stages, games, players) and had to be manipulated to get the dyadic structure needed. To accomplish this, each unique dyadic combination (player-requester) was identified, harvest request sizes were standardized by max allowed for each Round, forest level and pooled request size were calculated for each round according to the above equations, binary attributes were added to indicate player helping in previous round, and additional block effects data were joined (date, location).
+
+The entire process is too complicated for a coherent visual, but the code can be viewed below:
+
+```{r,eval=FALSE}
+# Let's build a simple Bayesian regression model to analyze graduated sanctioning in the milpa game.
+
+# Load data 
+load("~/MilpaGameBayes/games.combined.Rdata")
+# wrangle
+d1<-subset(all.stages, all.stages$Stage == "Stage2" & all.stages$Round %in% 11:20)
+d2<-melt(d1, value.name = "Request", variable.name="Requestor", id.vars=c("GameId", "Stage", "Round"))
+d3<-subset(all.help, all.help$Stage == "Stage2" & all.help$Round %in% 11:20)
+d4<-melt(d3, variable.name="Requestor", value.name = "Helped")
+d4<-d4[order(d4$Player),]
+d4$Helped<-ifelse(is.na(d4$Helped),0,1)
+d5<-merge( x=d4, y=d2, all.x=TRUE )
+# subset(d5,is.na(d5$Request)) # why NA?
+d6<-d5[complete.cases(d5),]
+d6$Round <- as.integer(d6$Round)
+#determines if player was helped by requestor in previous round
+d6$RHelpedBefore <- NA
+for (i in 1:nrow(d6)) {
+  d6[i,]$RHelpedBefore <- sum(
+    with(d6,
+        (GameId    == d6[i,]$GameId) &
+        (Stage     == d6[i,]$Stage) &
+        (Round     == (d6[i,]$Round - 1)) &
+        (Player    == d6[i,]$Requestor) &
+        (Requestor == d6[i,]$Player) &
+        (Helped    == 1)
+      ))
+}
+#determines if requestor was helped by player in previous round
+d6$PHelpedBefore <- NA
+for (i in 1:nrow(d6)) {
+  d6[i,]$PHelpedBefore <- sum(
+    with(d6,
+        (GameId    == d6[i,]$GameId) &
+        (Stage     == d6[i,]$Stage) &
+        (Round     == (d6[i,]$Round - 1)) &
+        (Player    == d6[i,]$Player) &
+        (Requestor == d6[i,]$Requestor) &
+        (Helped    == 1)
+      ))
+}
+#get actual individual player id
+d6 <- left_join(d6,all.players %>% select(GameId,Stage.2,PlayerId),by=c("GameId","Player" = "Stage.2"))
+
+#get actual individual requestor id
+d6 <- left_join(d6,all.players %>% mutate(RequestorId = PlayerId) %>% select(GameId,Stage.2,RequestorId),by=c("GameId","Requestor" = "Stage.2"))
+
+#get date of game for block effects
+d6 <- left_join(d6,all.games %>% select("GameId","Date","Location"),by="GameId")
+
+d7 <- d6 %>%
+  group_by(GameId,Stage,Round,Requestor) %>%
+  summarize(amount=min(Request,sum(Helped))) %>%
+  ungroup(Requestor) %>%
+  summarise(chips.cleared = sum(amount))
+
+d7$forest.size <- as.numeric(NA)
+d7$max.request <- as.numeric(NA)
+for (g in group_rows(d7)) {
+  for (r in g) {
+    ifelse(
+      d7[r,]$Round == 11,
+      {
+        d7[r,]$forest.size <- 100;
+        d7[r,]$max.request <- 5
+      },
+      {
+        last.forest.size <- d7[r-1,]$forest.size;
+        init.size <- last.forest.size - min(
+          d7[r-1,]$chips.cleared,
+          d7[r-1,]$max.request * 5,
+          last.forest.size);
+        
+        d7[r,]$forest.size <- init.size + floor(init.size / 10);
+  
+        cur.forest.size <- d7[r,]$forest.size;
+        d7[r,]$max.request <- case_when(
+          cur.forest.size >= 25 ~ 5,
+          cur.forest.size %in% 20:24 ~ 4,
+          cur.forest.size %in% 15:19 ~ 3,
+          cur.forest.size %in% 10:14 ~ 2,
+          cur.forest.size < 10 ~ 1)
+      })
+  }
+}
+
+d8 <- left_join(d6,d7)
+d8 <- d8 %>% mutate(req.scaled = Request / max.request)
+d8[d8$req.scaled > 1,]$req.scaled <- 1
+#1 => (0,0) = ( PN = pl did not help , RN = req did not help )
+#2 => (1,0) = ( PH = pl helped ,       RN = req did not help )
+#3 => (0,1) = ( PN = pl did not help , RH = req did help )
+#4 => (1,1) = ( PH = pl helped ,       RH = req did help )
+d8$treatment <- 1 + d8$PHelpedBefore + 2*d8$RHelpedBefore
+d8 <- d8[!(d8$Player == d8$Requestor | d8$Round == 11),]
+
+orderPR <- with(d8,order(GameId,Round,Player,Requestor)) 
+orderRP <- with(d8,order(GameId,Round,Requestor,Player))  #inverted player-requestor order
+
+
+#improved
+d9 <- d8[orderPR,]
+d9$helpRP <- as.integer(d8[orderRP,]$Helped)
+d9 <- d9[!duplicated(data.frame(t(apply(d9 %>% select(GameId,Stage,Round,PlayerId,RequestorId),1,sort)))),] #remove duplicate combinations of dyads (requestor-player combos)
+d9$dyad <- interaction(
+  do.call(pmax, d9 %>% select(PlayerId,RequestorId)),
+  do.call(pmin, d9 %>% select(PlayerId,RequestorId)),
+  drop=T) #dyad ids
+
+d9$PlayerId <- forcats::fct_c(as.factor(d9$PlayerId),as.factor(d9$RequestorId)) %>% head(nrow(d9))
+d9$RequestorId <- forcats::fct_c(as.factor(d9$PlayerId),as.factor(d9$RequestorId)) %>% tail(nrow(d9))
+
+#data has good counts of each combination of help/no-help
+table(d9$Helped,d9$helpRP)
+
+```
+
+At a glance, the completed dyadic dataset looks like:
+
+```{r}
+head(d9,10)
+```
+
+To visualize some of the variation in the data, below is a plot showing the mean request size (scaled by max allowed) across rounds for each individual game. The mean is plotted in red. It is easy to see that there are many strategies - and outcomes - represented in the Stage II data.
+
+```{r}
+with(d8 %>% group_by(GameId,Round,Stage) %>% summarize(mean.req = mean(req.scaled)) %>% arrange(GameId,Stage,Round),{plot(Round,mean.req);for (i in GameId) lines(Round[which(GameId==i)],mean.req[GameId==i],col=alpha("black",0.1));})
+lines(12:20,(d8 %>% group_by(Round) %>% summarize(y =mean(req.scaled)))$y,col="red",lwd=3)
+```
+
+## Models
+
+### Cross-Classified Interaction MLM
+
+To start, a simple helping model was constructed. The possibility of helping another player can be modeled as a binary outcome where 1 and 0 imply helping or witholding help, respectively.
+
+$$H_i \sim Binomial(1,p_i)$$
+
+However, each individual player is likely to have their own average rate of helping, which could in turn depend on forest size, round, who the requestor is, and more. To capture this additional complexity, a multi-level model is needed.
+
+We can transform $p_i$ using the logit link and include effects that will vary based on actor (individual player), treatment, and block (date).
+
+$$logit(p_i) = \gamma_{TID[i]} + \alpha_{ACTOR[i],TID[i]} + \beta_{BLOCK[i],TID[i]}$$
+
+This linear model for $logit(p_i)$ contains an average log-odds for each treatment, an effect for each actor in each treatment, and finally an effect for each block in each treatment.
+
+The "treatments" here will be based on whether a player gave and/or received help (from a specific requestor) in the previous round.
+
+"Treatment" Effects
+![](treatmentspng.PNG)
+
+### Priors
+
+The priors for the helping MLM are:
+
+$$\beta_j \sim Normal(0,1)\\ \alpha_j \sim Normal(\bar\alpha,\sigma_\alpha)\\ \gamma_j \sim Normal(0,\sigma_\gamma)\\ \bar\alpha \sim Normal(0,1.5)\\ \sigma_\alpha,\sigma_\gamma \sim Exponential(1) $$
+
+Note that each cluster variable has a vector of parameters (j will vary based on how many). The initial values chosen were fairly modest, as there is no prior knowledge that would suggest any major distributional shifts be added.
+
+In the actual model, these priors are transformed using non-centered parameterization.
+
+### Social Relations Model
+
+The second model considered was a social relations model, which can capture the dyadic structure of the data and reveal generalized giving/receiving effects as well as dyad-specific effects. 
+
+There is an outcome for each pairing in this model, which also means the player-requestor relationship is more generalized.
+
+$$help_{Player\to Requestor} \sim Binomial(1,p_{_{PR}})\\ logit(p_{_{PR}}) = \alpha + g_P + r_R + d_{PR}$$
+
+$$help_{Requestor\to Player} \sim Binomial(1,p_{_{RP}})\\ logit(p_{_{RP}}) = \alpha + g_R + r_P + d_{RP}$$
+
+Where g, r, and d are for giving, receiving, and dyadic effects, respectively.
+
+### Priors
+
+This model requires some multi-normal priors. To allow for giving and receiving parameters to be correlated, $g_i$ and $r_i$ can be modeled symmetrically as:
+
+$$(^{g_i}_{r_i}) \sim MVNormal((^0_0),(^{\sigma_g^2}_{\sigma_g\sigma_r\rho_{gr}} \ \  ^{\sigma_g\sigma_r\rho_{gr}}_{\sigma_r^2}))$$
+
+And to represent the population of dyad effects:
+
+$$(^{d_{ij}}_{d_{ji}}) \sim MVNormal((^0_0),(^{\sigma_d^2}_{\sigma_d^2\rho_{d}} \ \  ^{\sigma_d^2\rho_{d}}_{\sigma_{d}^2}))$$
+
+Note that there is only one standard deviation parameter because the labels in each dyad are arbitrary.
+
+In the actual model, a cholesky matrix prior is specified at levels 4 and 8 for the giving/receiving varying effects matrix and dyadic effects matrix, respectively. Tuning the parameter to be more or less skeptical of high correlations did not ultimately change output significantly.
+
+## DAG
+
+The Milpa Game includes a large number of potential variables. Lag effects make a Directed Acyclic Graph even more complicated. However, this can still be a useful tool for mapping out the various influences. One potential DAG for the game could be:
+
+```{r,include=F,fig.height=5,fig.width=5}
+dag <- dagitty( "dag {
+  HarvestRequest -> HelpReceived <- ForestLevel -> HarvestRequest -> ClearingSize <- HelpReceived <- HelpReceivedLastRound -> HarvestRequest
+  HelpReceived <- HelpGivenLastRound -> HarvestRequest
+}")
+coordinates(dag) <- list(
+  x=c(ForestLevel=-0.1,ClearingSize=-0.1,HelpReceived=1,HelpReceivedLastRound=-0.1,HelpGivenLastRound=-0.1,HarvestRequest=-1.4),
+  y=c(ForestLevel=-1,ClearingSize=1,HelpReceived=0,HelpReceivedLastRound=0.4,HelpGivenLastRound=-0.4,HarvestRequest=0)
+)
+plot( dag )
+
+```
+
+The lag effects, HRLR and HGLR, will be used to create the 4 "treatments" of the first model. 
+
+## MCMC Simulation
+
+### Design
+
+We can construct a simple simulation of the Milpa Game to test the social relations model output, and then compare to the actual results.
+
+The simulation draws from a population of 150 players, picking 5 for each game (repeats are possible across games). Then, across 10 rounds, players in each unique dyad decide whether to help or withold help. This decision is based on a Bernoulli trial, but the probability p is drawn from a random normal and then adjusted based on the previous round. There are sigificant boosts to helping when previous cooperation is exhibited, and penalties when help is witheld. These weights were tuned such that dyadic effects were strong but there was still a possibility for changing strategies mid-game.
+
+```{r}
+sim_game = function(n,num.round) {
+  helping = list()
+  helping[[1]] <- as.data.frame(list(pl=rep(0,n),req=rep(0,n)))
+  for (i in 2:num.round) {
+    helping[[i]] <- sim_round(helping[[i-1]]$pl,helping[[i-1]]$req)
+  }
+  return(helping)
+}
+
+sim_round = function(phR, rhP) {
+  probs <- rnorm(2*length(phR)) + 0.3 * rep((phR+ rhP),2) - 0.5 * (c(phR,rhP)==0) - 0.6 * (c(rhP,phR)==0) #bonus for previous help, penalty for withholding help
+  probs <- ifelse(probs > 1,1,probs)
+  return(split(rbern(2*length(phR),(probs-min(probs))/ max(probs-min(probs))),c(rep("pl",length(phR)),rep("req",length(phR)))))
+}
+
+sim_data = function(num.pl,num.games,rounds.per.game) {
+  d <- data.frame(matrix(ncol=7,nrow=10*num.games*rounds.per.game))
+  names(d) <- c('GameId','Round','PlayerId','RequestorId','dyad','Helped','helpRP')
+  d$GameId <- unlist(lapply(1:num.games,rep,10*rounds.per.game))
+  d$Round <- rep(unlist(lapply(1:rounds.per.game,rep,10)),num.games)
+  for (i in 1:num.games) {
+    players <- sample(1:num.pl,5) #5 players (A,B,C,D,E) selected from population of 150; can be selected for numerous games
+    d[d$GameId==i,]$PlayerId <- players[c(1,1,1,1,2,2,2,3,3,4)]
+    d[d$GameId==i,]$RequestorId <- players[c(2,3,4,5,3,4,5,4,5,5)]
+    d[d$GameId==i,]$dyad <- with(d[d$GameId==i,],paste(PlayerId,RequestorId,sep=".")) #AB,AC,AD,AE,BC,...
+    res <- sim_game(10,rounds.per.game) #10 combinations of players
+    d[d$GameId==i,]$Helped <- unlist(lapply(res,FUN=function(x){x$pl}))
+    d[d$GameId==i,]$helpRP <- unlist(lapply(res,FUN=function(x){x$req}))
+  }
+  return(d[d$Round!=1,])
+}
+
+sim.d <- sim_data(150,40,10)
+
+table(sim.d[,6:7]) #reasonable counts for both
+
+sim.d %>% mutate(combH = Helped + helpRP) %>% group_by(dyad,Round) %>% summarise(avgHelp=mean(combH)) %>% ungroup(Round,dyad) %>% ggplot(aes(Round,jitter(avgHelp)))+stat_smooth(geom='line',mapping=aes(group=factor(dyad)),show.legend = F,se = F,alpha=0.3)+geom_line(data=as.data.frame(spline(sim.d$Round,sim.d%>%transmute(combH=Helped+helpRP) %>%.[,1])),aes(x=x,y=y,lwd=1,col="red",alpha=0.7))
+
+```
+
+This plot shows the variation in dyad strategies across games and rounds, with the mean helping sum calculated in red. A value of 1 on the y axis would symbolize 1 of the players in a dyad helping the other, and 2 implying both cooperated. 
+
+### Testing
+
+```{r,eval=FALSE}
+
+dlist <- list(
+  pid = as.integer(factor(sim.d$PlayerId)),
+  rid = as.integer(factor(sim.d$RequestorId)),
+  did = as.integer(factor(sim.d$dyad)),
+  helpPR = as.integer(sim.d$Helped),
+  helpRP = as.integer(sim.d$helpRP),
+  N = nrow(sim.d),
+  N_players = length(unique(append(sim.d$PlayerId,sim.d$RequestorId)))
+)
+
+m3.sim <- ulam(alist(
+
+  helpPR ~ dbinom( 1, pPR ),
+  helpRP ~ dbinom( 1, pRP ),
+  logit(pPR) <- a + gr[pid,1] + gr[rid,2] + d[did,1] ,
+  logit(pRP) <- a + gr[rid,1] + gr[pid,2] + d[did,2] ,
+  a ~ normal(0,1),
+  
+  ## gr matrix of varying effects
+  vector[2]:gr[N_players] ~ multi_normal(0,Rho_gr,sigma_gr),
+  Rho_gr ~ lkj_corr(3),
+  sigma_gr ~ exponential(1),
+  
+  ## dyad effects
+  transpars> matrix[N,2]:d <-compose_noncentered( rep_vector(sigma_d,2) , L_Rho_d , z ),
+  matrix[2,N]:z ~ normal( 0 , 1 ),
+  cholesky_factor_corr[2]:L_Rho_d ~ lkj_corr_cholesky( 4 ),
+  sigma_d ~ exponential(1),
+  
+  ## compute correlation matrix for dyads
+  gq> matrix[2,2]:Rho_d <<- Chol_to_Corr( L_Rho_d )
+  
+), data=dlist , chains=4 , cores=15 , iter = 6000 , warmup = 1500, control=list(adapt_delta=0.99,max_treedepth=15)) 
+
+```
+
+Outputs:
+
+```{r}
+post <- extract.samples( m3.sim )
+g <- sapply( 1:100 , function(i) post$a + post$gr[,i,1] )
+r <- sapply( 1:100 , function(i) post$a + post$gr[,i,2] )
+Eg_mu <- apply( inv_logit(g) , 2 , mean )
+Er_mu <- apply( inv_logit(r) , 2 , mean )
+
+plot( NULL , xlim=c(0,1) , ylim=c(0,1) , xlab="generalized giving" ,
+      ylab="generalized receiving" , lwd=1.5 )
+abline(a=0,b=1,lty=2)
+
+# ellipses
+for ( i in 1:100) {
+  Sigma <- cov( cbind( g[,i] , r[,i] ) )
+  Mu <- c( mean(g[,i]) , mean(r[,i]) )
+  for ( l in c(0.5) ) {
+    el <- ellipse( Sigma , centre=Mu , level=l )
+    lines( inv_logit(el) , col=col.alpha("black",0.5) )
+  }
+}
+# individual means
+points( Eg_mu , Er_mu , pch=21 , bg="white" , lwd=1.5 )
+
+```
+
+This plot shows expected giving and receiving, absent any dyad-specific effects. Each point is a player and the ellipses are 50% compatibility regions. There is no clear relationship between average giving and receiving across players, most likely because our simulation was not complex enough to encode systematic variation among individuals in choice preferences. The compatibility regions are extremely tight as well, possibly because average giving and receiving rates were fairly similar across players. Introducing additional parameters to our simulation and varying individuals more might net more interesting results. However, it is worth noting that the simulated data took almost four times along to complete MCMC, totalling over two hours of sampling time despite 15 cores. It is unclear why this dataset took significantly longer.
+
+Below are the mean and 89% compatibility regions for various parameters:
+
+```{r}
+precis(m3.sim,3,pars=c("Rho_gr","sigma_gr") ) %>% precis_plot()
+precis( m3.sim, depth=3 , pars=c("Rho_d","sigma_d") ) %>% precis_plot()
+```
+
+The first plot seems to indicate that very little is inferred about generalized giving and receiving. This could possibly be because rates were drawn from a normal distribution and boosts/penalties were not significant enough.
+
+The second plot suggests significant variation in dyadic effects, with the dyads being relatively strongly correlated overall. This can also be seen below:
+
+```{r}
+dy1 <- apply( post$d[,,1] , 2 , mean )
+dy2 <- apply( post$d[,,2] , 2 , mean )
+plot( dy1 , dy2 ,xlab="person A in dyad",ylab="person B in dyad",col=alpha("black",0.7))
+abline(a=0,b=1,lty=2)
+abline(h=0,lty=2)
+abline(v=0,lty=2)
+#zoomed in
+plot( dy1 , dy2 ,xlab="person A in dyad",ylab="person B in dyad",col=alpha("black",0.5),ylim=c(-.03,.03),xlim=c(-.005,.005))
+abline(a=0,b=1,lty=2)
+abline(h=0,lty=2)
+abline(v=0,lty=2)
+```
+
+There is a clear spread across helping/receiving behavior overall, but points are very close to the dashed line (y=x), again signaling strong dyadic correlation.
+
+## Fitted Models
+
+The Multilevel Model of helping was fitted using the Helped flag, Player Id (as game-specific letters do not represent the individual across games), Date as a block effect, and the treatments based on previous helping behavior.
+
+The non-centered version can be viewed in the code below. To combat diverging chains, low effective sample sizes, and other miscellaneous warnings, the MCMC was run across 2000 iterations, 700 of which were warm-up, and the adapt delta parameter controlling acceptance criterion was raised to 0.97. Chains mixed well and did not take very long to complete.
+
+```{r,eval=FALSE}
+# make data list
+dlist <-list(
+  helped=as.integer(d8$Helped), 
+  actor=as.integer(factor(d8$PlayerId)),
+  treatment=as.integer(d8$treatment),
+  block_id=as.integer(factor(d8$Date))
+  )
+precis(dlist)
+
+#varying intercepts model
+m2 <- ulam(alist(
+  helped ~ dbinom( 1 , p ) ,
+  logit(p) <- a_bar + z[actor]*sigma_a + # actor intercepts
+    x[block_id]*sigma_g +      # block intercepts
+    b[treatment],
+  b[treatment] ~ dnorm( 0 , 0.5 ),
+  z[actor] ~ dnorm( 0 , 1 ),
+  x[block_id] ~ dnorm( 0 , 1 ),
+  a_bar ~ dnorm( 0 , 1.5 ),
+  sigma_a ~ dexp(1),
+  sigma_g ~ dexp(1),
+  gq> vector[actor]:a <<- a_bar + z*sigma_a,
+  gq> vector[block_id]:g <<- x*sigma_g
+  ), data=dlist , chains=4 , cores=15 , iter = 2000 , warmup = 700, control=list(adapt_delta=0.97))
+
+```
+
+
+Social Relations Model
+
+The fitted social relations model used the dyadic dataset, which excludes duplicate pairings within rounds and games. Instead, the directional exchange of helping and receiving help is represented by two attributes: 1. help from player to requestor and 2. help from requestor to player. Player ID, requestor ID, and specific dyad IDs for each pairing were also passed in. The model specification takes advantage of the non_centered helper functions in RStan. Chains mixed well, with an occasional divergence and expected warnings about effective sample size, given the large number of parameters.
+
+```{r,eval=FALSE}
+dlist <- list(
+#  F = standardize(d9$forest.size),
+ # R = standardize(d9$req.scaled),
+ # C = standardize(d9$chips.cleared),
+#  block_g = as.integer(factor(d9$GameId)),
+#  block_d = as.integer(factor(d9$Date)),
+#  block_r = as.integer(factor(d9$Round)),
+  pid = as.integer(d9$PlayerId),
+  rid = as.integer(d9$RequestorId),
+  did = as.integer(factor(d9$dyad)),
+# treatment = as.integer(d8[orderPR,]$treatment),
+  helpPR = as.integer(d9$Helped),
+  helpRP = as.integer(d9$helpRP),
+  N = nrow(d9),
+  N_players = length(unique(append(d9$PlayerId,d9$RequestorId)))
+)
+
+m3 <- ulam(alist(
+
+  helpPR ~ dbinom( 1, pPR ),
+  helpRP ~ dbinom( 1, pRP ),
+  logit(pPR) <- a + gr[pid,1] + gr[rid,2] + d[did,1] ,
+  logit(pRP) <- a + gr[rid,1] + gr[pid,2] + d[did,2] ,
+  a ~ normal(0,1),
+  
+  ## gr matrix of varying effects
+  vector[2]:gr[N_players] ~ multi_normal(0,Rho_gr,sigma_gr),
+  Rho_gr ~ lkj_corr(4),
+  sigma_gr ~ exponential(1),
+  
+  ## dyad effects
+  transpars> matrix[N,2]:d <-compose_noncentered( rep_vector(sigma_d,2) , L_Rho_d , z ),
+  matrix[2,N]:z ~ normal( 0 , 1 ),
+  cholesky_factor_corr[2]:L_Rho_d ~ lkj_corr_cholesky( 8 ),
+  sigma_d ~ exponential(1),
+  
+  ## compute correlation matrix for dyads
+  gq> matrix[2,2]:Rho_d <<- Chol_to_Corr( L_Rho_d )
+  
+), data=dlist , chains=4 , cores=15 , iter = 6000 , warmup = 1500, control=list(adapt_delta=0.99,max_treedepth=15)) 
+
+```
+
+## Results & Discussion
+
+### Model 1: MLM
+
+The first model produced outputs that aligned with expected behavioral trends; that is, players were more likely to help another if previous help had been given. However, there is a notable difference depending on whether the player was the giver or receiver of the help.
+
+Below is the average expected helping by treatment and 89% compatibility regions. Note that PN represents the player witholding help on the previous round, PH represents the player helping on the previous round, and so on.
+
+```{r}
+#looking at just treatment
+precis_plot(precis(m2,pars=c("b"),2),labels = c(
+  "PN / RN",
+  "PH / RN",
+  "PN / RH", 
+  "PH / RH")) 
+
+```
+
+Next is helping by individual, on the original scale. The contrasts are shown between pairings of treatments as well.
+
+```{r}
+#individuals on original scale
+post <- extract.samples(m2)
+p_help <- inv_logit( post$a )
+precis_plot( precis( as.data.frame(p_help) ) , xlim=c(0,1))
+#density of means on original scale
+dens(precis(as.data.frame(p_help))[,1])
+
+#contrasts
+diffs <- list(
+  db13 = post$b[,1] - post$b[,3],
+  db24 = post$b[,2] - post$b[,4],
+  db12 = post$b[,1] - post$b[,2],
+  db34 = post$b[,3] - post$b[,4] )
+
+precis_plot( precis(diffs[1:2]) ,xlim = c(-0.8,0))
+precis_plot( precis(diffs[3:4]) ,xlim = c(-1.4,0))
+```
+
+The variation in block (Date) and individuals (Actors) are both similar in magnitude, but not extreme.
+
+```{r}
+#density of the sigmas
+denschart(post[c("sigma_a","sigma_g")]) #the variation in blocks appears to be slightly greater than that of individuals (actors), but both are notable
+precis_plot(precis(m2,pars="g",2)) #variation in block seen clearly here
+```
+
+Priors can be validated using a custom link function for the inverse logit. The following plot shows the expected proportion helped by treatment category along with 89% compatibility regions. Then, 100 individuals are drawn from the posterior distribution, simulating the potential variation and scattering across priors.
+
+```{r}
+#checking priors using RM's custom link for chimpanzee MLM 
+p_link_abar <- function( treatment ) {
+  logodds <- with( post , a_bar + b[,treatment] )
+  return( inv_logit(logodds) )
+}
+p_raw <- sapply( 1:4 , function(i) p_link_abar( i ) )
+p_mu <- apply( p_raw , 2 , mean )
+p_ci <- apply( p_raw , 2 , PI )
+plot( NULL , xlab="treatment" , ylab="proportion helped" ,ylim=c(0,1) , xaxt="n" , xlim=c(1,4) )
+axis( 1 , at=1:4 , labels=c("PN / RN","PH / RN","PN / RH", "PH / RH") )
+lines( 1:4 , p_mu )
+shade( p_ci , 1:4 )
+
+a_sim <- with( post , rnorm( length(post$a_bar) , a_bar , sigma_a ) )
+p_link_asim <- function( treatment ) {
+  logodds <- with( post , a_sim + b[,treatment] )
+  return( inv_logit(logodds) )
+}
+p_raw_asim <- sapply( 1:4 , function(i) p_link_asim( i ) )
+plot( NULL , xlab="treatment" , ylab="proportion helped" ,ylim=c(0,1) , xaxt="n" , xlim=c(1,4) )
+axis( 1 , at=1:4 , labels=c("PN / RN","PH / RN","PN / RH", "PH / RH") )
+for ( i in 1:100 ) lines( 1:4 , p_raw_asim[i,] , col=grau(0.25) , lwd=2 )
+
+```
+
+Results from the first model support the hypothesis that previous helping behavior does lead to increased future help within dyads, with the requestor's previous help being slightly more important in this decision than that of the player.
+
+### Model 2: SRM
+
+Samples extracted from the social relations model are a bit more problematic than those of the first model, and represent a work in progress. However, for the purposes of this report, results will be interpreted as is.
+
+As with the simulated data, the first plot shows the generalized giving and receiving across individuals.
+
+```{r}
+post <- extract.samples( m3 )
+g <- sapply( 1:100 , function(i) post$a + post$gr[,i,1] )
+r <- sapply( 1:100 , function(i) post$a + post$gr[,i,2] )
+Eg_mu <- apply( inv_logit(g) , 2 , mean )
+Er_mu <- apply( inv_logit(r) , 2 , mean )
+
+plot( NULL , xlim=c(0,1) , ylim=c(0,1) , xlab="generalized giving" ,
+      ylab="generalized receiving" , lwd=1.5 )
+abline(a=0,b=1,lty=2)
+
+# ellipses
+for ( i in 1:100) {
+  Sigma <- cov( cbind( g[,i] , r[,i] ) )
+  Mu <- c( mean(g[,i]) , mean(r[,i]) )
+  for ( l in c(0.5) ) {
+    el <- ellipse( Sigma , centre=Mu , level=l )
+    lines( inv_logit(el) , col=col.alpha("black",0.5) )
+  }
+}
+# individual means
+points( Eg_mu , Er_mu , pch=21 , bg="white" , lwd=1.5 )
+## the expected giving and receiving, absent any dyad-specific effects. Each point is a player and the ellipses are 50% compatibility regions. It seems to suggest a positive (?) relationship between average giving and average receiving across players?
+```
+
+Absent any dyad-specific effects, it appears as though individuals give at a rater somewhat higher than random, but this has no bearing on the expected receiving, with some individuals much higher than others at the same giving coordinates. This vertical trend is certainly strange, and could represent an unaccounted for bias in the dataset or a mistake in the process.
+
+```{r}
+precis(m3,3,pars=c("Rho_gr","sigma_gr") ) %>% precis_plot()
+precis( m3, depth=3 , pars=c("Rho_d","sigma_d") ) %>% precis_plot()
+
+dy1 <- apply( post$d[,,1] , 2 , mean )
+dy2 <- apply( post$d[,,2] , 2 , mean )
+plot( dy1 , dy2 ,xlab="person A in dyad",ylab="person B in dyad",col=alpha("black",0.7))
+abline(a=0,b=1,lty=2)
+abline(h=0,lty=2)
+abline(v=0,lty=2)
+#zoomed in
+plot( dy1 , dy2 ,xlab="person A in dyad",ylab="person B in dyad",col=alpha("black",0.5),ylim=c(-.03,.03),xlim=c(-.005,.005))
+abline(a=0,b=1,lty=2)
+abline(h=0,lty=2)
+abline(v=0,lty=2)
+## Here are the dyad-specific effects, absent generalized giving and receiving. After accounting for overall rates of giving and receiving, this should show whether residual “helping” (?) is correlated within dyads
+```
+
+Unlike the dyad-specific effects of the simulated data, there is not a strong overall trend here. This suggests that residual helping is not strongly correlated within dyads, which is contrary to what might be expected of the Milpa Game given past experimental conclusions. Again, there is more to be done in refining this model before the outputs are trustworthy.
+
+In the future, potential other models could include a scientific, ODE-based model or Hidden Markov, which replaces faulty assumptions about round-dependence in a potential time-series model with a system of states.
+
+
+## References
+
+Balée, W. (2013). Cultural forests of the Amazon: a historical ecology of people and their landscapes. University of Alabama Press.
+
+Boserup, E. (1965). The conditions of agricultural growth: the economics of agrarian change under population pressure. G. Allen and Unwin.
+
+Conklin, H. C. (1954). Section of anthropology: an ethnoecological approach to shifting agriculture. Transactions of the New York Academy of Sciences, 17(2 Series II):133–142.
+
+Downey, S. S. 2010. Can properties of labor-exchange networks explain the resilience of swidden agriculture? *Ecology and Society* 15(4): 15. [online] URL: http://www.ecologyandsociety.org/vol15/iss4/art15/
+
+Downey, S. S. (2015). Q’eqchi’ Maya swidden agriculture, settlement history, and colonial enterprise in modern Belize. Ethnohistory, 57(3):389–414.
+
+Downey, S.S., Gerkey, D. & Scaggs, S.A. The Milpa Game: a Field Experiment Investigating the Social and Ecological Dynamics of Q’eqchi’ Maya Swidden Agriculture. *Hum Ecol* 48, 423–438 (2020). https://doi.org/10.1007/s10745-020-00169-x
+
+Rappaport, R. A. (1967). Ritual regulation of environmental relations among a New Guinea people. Ethnology, 6(1):17.
+
+Féret, J.-B., de Boissieu, F., 2019. biodivMapR: an R package for α‐ and β‐diversity mapping using remotely‐sensed images. Methods Ecol. Evol. 00:1-7. https://doi.org/10.1111/2041-210X.13310
+
+Féret, J.-B., Asner, G.P., 2014. Mapping tropical forest canopy diversity using high-fidelity imaging spectroscopy. Ecol. Appl. 24, 1289–1296. https://doi.org/10.1890/13-1824.1
+
+Food and Agriculture Organization (1985). Tropical forestry: action plan. Food & Agriculture Organiza- tion of the United Nations.
+
+Geertz, C. (1963). Agricultural involution: the processes of ecological change in Indonesia. University of California Press.
+
+Hesselbarth, M.H.K., Sciaini, M., With, K.A., Wiegand, K., Nowosad, J. 2019. landscapemetrics: an open‐source R tool to calculate landscape metrics. *Ecography*, 42: 1648-1657 (ver. 0).
+
+Malthus, T. R. (1826). An essay on the principle of population. J. Murray.
+
+Nash, J. F. et al. (1950). Equilibrium points in n-person games. Proceedings of the National Academy of Sciences, 36(1):48–49.
+
+Weinstock, J. A. (2015). The future of swidden cultivation. In Cairns, M. F., (ed.), Shifting cultivation and environmental change: indigenous people, agriculture, and forest conservation. Routledge, pp. 179–85.
+
+Wilk, R. R. (1997). Household ecology. Northern Illinois University Press.
+
+
+
